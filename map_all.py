@@ -1,8 +1,7 @@
 #!/usr/bin/python
 
 # Created by Elizabeth Beam on 7/9/17
-# Compute an xml matrix of anatomical term co-occurrences within full text of articles (abstracts removed)
-# Example function call: map("/path/to/psychiatlas/directory", threshold = 100, input = "abstracts")
+# Compute an xml matrix of anatomical and/or behavioral term co-occurrences
 
 import ast
 import csv
@@ -14,8 +13,10 @@ import re
 import string
 
 # Function to get base of network file names
-def get_filename(path, input, type, behav_input = None, smooth = None, sigma = None, strategy = None, threshold = None, window = None, lemmas = None, level = None, raw_only = None):
+def get_filename(path, input, anat = None, behav = None, func = None, behav_input = None, smooth = None, sigma = None, strategy = None, threshold = None, window = None, lemmas = None, neighbors = None, level = None, scrambled = None, raw_only = None):
     base = "{}/networks/{}_{}_".format(path, input, level)
+    if scrambled:
+        base = "{}/networks/_scrambled/{}_{}_".format(path, input, level)
     if input == 'coordinates':
         if not smooth:
             base += "raw_{}_".format(strategy)
@@ -27,20 +28,25 @@ def get_filename(path, input, type, behav_input = None, smooth = None, sigma = N
         elif int(window).isdigit():
             base += "window{}_".format(window)
     if lemmas:
-        base += "lemmas_"
-    base += type
-    if type == 'func' and behav_input:
-        base += "_" + behav_input
+        base += "lemmas_{}neighbors_".format(neighbors)
+    if anat == True:
+        base += "anat"
+    if behav == True:
+        base += "behav"
+    if func == True:
+        base += "func"
+        if input == "coordinates":
+            base += "_" + behav_input
     if threshold and not raw_only:
         base += "_thres{}".format(threshold)
     return base
 
 # Function to check whether networks exist
-def networks_exist(path, input, anat = None, behav = None, func = None, behav_input = None, strategy = None, smooth = None, sigma = None, window = None, lemmas = None, level = None, threshold = None):
-    anat_map = os.path.isfile(get_filename(path, input, 'anat', smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, level = level, raw_only = True) + ".xml")
-    behav_map = os.path.isfile(get_filename(path, input, 'behav', smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, level = level, raw_only = True) + ".xml")
-    func_map = os.path.isfile(get_filename(path, input, 'func', behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, threshold = threshold, level = level, raw_only = True) + ".xml")
-    if input == 'abstracts' or input == 'texts':
+def networks_exist(path, input, anat = None, behav = None, func = None, behav_input = None, strategy = None, smooth = None, sigma = None, window = None, lemmas = None, neighbors = None, level = None, threshold = None, scrambled = None):
+    anat_map = os.path.isfile(get_filename(path, input, anat = True, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled, raw_only = True) + ".xml")
+    behav_map = os.path.isfile(get_filename(path, input, behav = True, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled, raw_only = True) + ".xml")
+    func_map = os.path.isfile(get_filename(path, input, func = True, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, threshold = threshold, level = level, scrambled = scrambled, raw_only = True) + ".xml")
+    if input in ['abstracts', 'texts', 'results']:
         if anat_map and behav_map and func_map:
             return True
     if input == 'coordinates':
@@ -51,7 +57,7 @@ def networks_exist(path, input, anat = None, behav = None, func = None, behav_in
     return None
 
 # Function to load data dictionary
-def load_data(path, level):
+def load_data(path, level, dual_key = None):
     data_file = "{}/data/data_studies.csv".format(path)
     if level:
         data_file = "{}/data/data_{}.csv".format(path, level)
@@ -59,12 +65,27 @@ def load_data(path, level):
     fdat = open(data_file, "rU")
     dat_reader = csv.DictReader(fdat)
     for dict in dat_reader:
-        if level == 'experiments':
+        if dual_key and level == 'experiments':
             key = dict['KEY'] + " " + dict['EXPERIMENT'].translate(None, string.punctuation).replace("  ", " ")
         else:
             key = dict['KEY']
         data.update({key: dict})
     return data
+
+# Function to load terms for coordinates
+def load_coords(query_path, file):
+    coord_file = "{}/{}".format(query_path, file)
+    raw_coords = [line.split(",") for line in open(coord_file, "r").readlines()]
+    if raw_coords[0][0][0] == "[": # Stored as list literal
+        coords = ast.literal_eval(open(coord_file, "r").read())
+    else: # Spaces between labels and probabilities, commas between label/probability pairs, line breaks between coordinates
+        coords = []
+        for coord in raw_coords:
+            coord_terms = []
+            for term in coord:
+                coord_terms.append(term.strip().split(" "))
+            coords.append(coord_terms)
+    return coords
 
 # Function to load a list of labels
 def init_labs(label_file):
@@ -86,8 +107,8 @@ def init_mat(label_list_1, label_list_2):
     return matrix
 
 # Function to load a dictionary of terms and lemmas
-def load_lemmas(path):
-    lemma_file = "{}/vecs/lemmas_texts.csv".format(path)
+def load_lemmas(path, neighbors):
+    lemma_file = "{}/vecs/lemmas_texts_{}neighbors_dictionary.csv".format(path, neighbors)
     lemma_dict = {}
     flem = open(lemma_file, "rU")
     lem_reader = csv.DictReader(flem)
@@ -97,12 +118,17 @@ def load_lemmas(path):
     return lemma_dict
 
 # Function to load terms from full text of article
-def get_text(path, input, key, data, level):
-    if level == 'experiments':
-        file = open("{}/texts/{}/preproc/{}.txt".format(path, input, data[key]['KEY']), "r")
-    else:
-        file = open("{}/texts/{}/preproc/{}.txt".format(path, input, key), "r")
-    return file.read().replace("\n", "")
+def get_text(path, input, key, data, level, scrambled = None):
+    text = ""
+    filename = "{}/texts/{}/preproc/{}.txt".format(path, input, key)
+    if scrambled:
+        filename = "{}/texts/{}/scrambled/{}/{}.txt".format(path, input, level, key)
+    if not scrambled and level == 'experiments':
+        filename = "{}/texts/{}/preproc/{}.txt".format(path, input, data[key]['KEY'])
+    if os.path.isfile(filename):
+        file = open(filename, "r")
+        text = file.read().replace("\n", "")
+    return text
 
 # Function to generalize Harvard-Oxford anatomical labels
 def gen_coord(label):
@@ -132,9 +158,9 @@ def gen_coord(label):
     return label
 
 # Function to load behavioral terms for a study from its full text, abstract, or BrainMap behavioral domains
-def get_behav(behav_input, behav_list, path, key, data, level, lemmas = None, lemma_dict = None):
-    if behav_input == 'texts':
-        full_text = get_text(path, behav_input, key, data, level)
+def get_behav(behav_input, behav_list, path, key, data, level, lemmas = None, lemma_dict = None, scrambled = None):
+    if scrambled or behav_input in ['texts', 'results']:
+        full_text = get_text(path, behav_input, key, data, level, scrambled = scrambled)
         if lemmas:
             behav_terms = list(set([lemma_dict[term]['LEMMA'] for term in full_text.split() if term in lemma_dict.keys() and lemma_dict[term]['CLASS'] == "behavior"]))
         else:
@@ -211,10 +237,10 @@ def load_mat(matrix, type = None, nodes = None, anat_nodes = None, behav_nodes =
 
 # Function to load undirected links for anatomical network from a single study or experiment
 def map_anat(anat_list, anat_mat, label_list, input = None, strategy = None, lemmas = None, lemma_dict = None):
-    if lemmas and input in ['abstracts', 'texts']:
+    if lemmas and input in ['abstracts', 'texts', 'results']:
         anat_nodes = list(set([lemma_dict[gen_coord(term)]['LEMMA'] for term in label_list if gen_coord(term) in lemma_dict.keys() and lemma_dict[gen_coord(term)]['CLASS'] == "anatomy"]))
     else:
-        if input in ['abstracts', 'texts']:
+        if input in ['abstracts', 'texts', 'results']:
             anat_nodes = list(set([term for term in label_list if term in anat_list]))
         elif strategy == 'winner-takes-all':
             anat_nodes = list(set([gen_coord(term) for term in label_list if gen_coord(term) in anat_list]))
@@ -228,7 +254,7 @@ def map_anat(anat_list, anat_mat, label_list, input = None, strategy = None, lem
 
 # Function to load undirected links for behavioral network from a single study or experiment
 def map_behav(behav_list, behav_mat, label_list, input = None, strategy = None, lemmas = None, lemma_dict = None):
-    if lemmas and input in ['abstracts', 'texts']:
+    if lemmas and input in ['abstracts', 'texts', 'results']:
         behav_nodes = list(set([lemma_dict[term]['LEMMA'] for term in label_list if term in lemma_dict.keys() and lemma_dict[term]['CLASS'] == "behavior"]))
     else:
         behav_nodes = list(set([term for term in label_list if term in behav_list]))
@@ -237,7 +263,7 @@ def map_behav(behav_list, behav_mat, label_list, input = None, strategy = None, 
 # Function to load undirected links for functional network from a single study or experiment
 def map_func(anat_list, behav_list, func_mat, label_list, input = None, strategy = None, lemmas = None, lemma_dict = None):
     if lemmas:
-        if input in ['abstracts', 'texts']:
+        if input in ['abstracts', 'texts', 'results']:
             anat_nodes = list(set([lemma_dict[term]['LEMMA'] for term in label_list if term in lemma_dict.keys() and lemma_dict[term]['CLASS'] == "anatomy"]))
             behav_nodes = list(set([lemma_dict[term]['LEMMA'] for term in label_list if term in lemma_dict.keys() and lemma_dict[term]['CLASS'] == "behavior"]))
         elif strategy == 'winner-takes-all':
@@ -254,7 +280,7 @@ def map_func(anat_list, behav_list, func_mat, label_list, input = None, strategy
             anat_nodes = [tuple([gen_coord(term[0]), term[1]]) for term in label_list if gen_coord(term[0]) in anat_list]
             behav_nodes = list(set([tuple([lemma_dict[term[0]]['LEMMA'], term[1]]) for term in label_list if term[0] in lemma_dict.keys() and lemma_dict[term[0]]['CLASS'] == "behavior"]))
     else:
-        if input in ['abstracts', 'texts']:
+        if input in ['abstracts', 'texts', 'results']:
             anat_nodes = list(set([term for term in label_list if term in anat_list]))
             behav_nodes = list(set([term for term in label_list if term in behav_list]))
         elif strategy == 'winner-takes-all':
@@ -330,9 +356,14 @@ def build_graph(matrix, threshold = None):
     return G
 
 # Function to build graphs and write to files
-def export(path, matrix, behav_input = None, threshold = None, type = None, input = None, smooth = None, sigma = None, strategy = None, window = None, lemmas = None, level = None):
+def export(path, matrix, behav_input = None, threshold = None, type = None, input = None, smooth = None, sigma = None, strategy = None, window = None, lemmas = None, neighbors = None, level = None, scrambled = None):
     graph = build_graph(matrix, threshold = threshold)
-    filename = get_filename(path, input, type, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, level = level)
+    if type == "anat":
+        filename = get_filename(path, input, anat = True, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled)
+    if type == "behav":
+        filename = get_filename(path, input, behav = True, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled)
+    if type == "func":
+        filename = get_filename(path, input, func = True, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled)
     networkx.write_graphml(graph, filename + ".xml")
     networkx.write_weighted_edgelist(graph, filename + ".csv", delimiter = ",")
 
@@ -345,24 +376,25 @@ def print_message(path, input, smooth, sigma, threshold):
         print("Threshold of {} was applied".format(threshold))
 
 # Function to execute the full mapping procedure
-def map(path, input, anat = None, behav = None, func = None, level = None, behav_input = None, strategy = None, smooth = None, sigma = None, threshold = None, window = None, lemmas = None, force = None):
+def map(path, input, anat = None, behav = None, func = None, level = None, behav_input = None, strategy = None, smooth = None, 
+    sigma = None, threshold = None, window = None, lemmas = None, neighbors = None, force = None, scrambled = None, dual_key = None):
+
+    # Create directory for networks if it does not exist
+    if not os.path.exists("{}/networks".format(path)):
+        os.mkdir("{}/networks".format(path))
 
     # Check if raw networks exist
-    if force or not networks_exist(path, input, anat = anat, behav = behav, func = func, behav_input = behav_input, strategy = strategy, smooth = smooth, sigma = sigma, window = window, lemmas = lemmas, level = level, threshold = threshold):
-        
-        # Instantiate labels
-        anat_labels = "{}/labels/harvard-oxford_anatomical_labels.txt".format(path)
-        behav_labels = "{}/labels/brainmap_behavioral-domain_labels.txt".format(path)
+    if force or not networks_exist(path, input, anat = anat, behav = behav, func = func, behav_input = behav_input, strategy = strategy, smooth = smooth, sigma = sigma, window = window, lemmas = lemmas, neighbors = neighbors, level = level, threshold = threshold, scrambled = scrambled):
 
         # Load labels and data
-        anat_list = init_labs(anat_labels)
-        behav_list = init_labs(behav_labels)
-        data = load_data(path, level)
+        anat_list = init_labs("{}/labels/harvard-oxford_anatomical_labels.txt".format(path))
+        behav_list = init_labs("{}/labels/brainmap_behavioral-domain_labels.txt".format(path))
+        data = load_data(path, level, dual_key = dual_key)
 
         # Load lemmas
         lemma_dict = {}
         if lemmas:
-            lemma_dict = load_lemmas(path)
+            lemma_dict = load_lemmas(path, neighbors)
         
         # Initialize matrices with anatomical and functional terms
         anat_mat = init_mat(anat_list, anat_list)
@@ -372,8 +404,52 @@ def map(path, input, anat = None, behav = None, func = None, level = None, behav
         # Initialize count for tracking studies in printed messages
         count = 1
         
+        # If input is scrambled (control condition), then map sentences in corpus 
+        if scrambled:
+
+            if not os.path.exists("{}/networks/_scrambled".format(path)):
+                os.mkdir("{}/networks/_scrambled".format(path))
+
+            if input in ['abstracts', 'results', 'texts']:
+                corpus = open("{}/texts/{}/scrambled_{}.txt".format(path, input, input), "r").readlines()
+                sentences = corpus[0].split(".")
+                for sentence in sentences:
+                    label_list = sentence.split()
+                    anat_mat, behav_mat, func_mat = get_mats(anat_list, behav_list, anat_mat, behav_mat, func_mat, label_list, anat = anat, behav = behav, func = func, input = input, lemmas = lemmas, lemma_dict = lemma_dict)
+
+            elif input == 'coordinates':
+                if smooth:
+                    query_path = "{}/queries/{}/scrambled/gaussian_{}mm".format(path, level, sigma)
+                elif not smooth:
+                    query_path = "{}/queries/{}/scrambled/raw".format(path, level)
+                files = filter(lambda f: not f.startswith("."), os.listdir(query_path))
+                for file in files:
+                    key = file.replace(".txt", "")
+                    coords = load_coords(query_path, file)
+                    behav_terms = []
+                    if func:
+                        behav_terms = get_behav(behav_input, behav_list, path, key, data, level, lemmas = lemmas, lemma_dict = lemma_dict, scrambled = True)
+                    if strategy == 'winner-takes-all':
+                        anat_terms = [coord[0][0] for coord in coords if coord]
+                        anat_mat, behav_mat, func_mat = get_mats(anat_list, behav_list, anat_mat, behav_mat, func_mat, behav_terms + anat_terms, anat = anat, func = func, input = input, strategy = 'winner-takes-all', lemmas = lemmas, lemma_dict = lemma_dict)
+                    elif strategy == 'probabilistic':
+                        if func:
+                            behav_terms = [[[term, 100] for term in behav_terms]]
+                        anat_terms = []
+                        for coord in coords:
+                            anat_terms.append([label for label in coord if coord])
+                        anat_mat, behav_mat, func_mat = get_mats(anat_list, behav_list, anat_mat, behav_mat, func_mat, behav_terms + anat_terms, anat = anat, func = func, input = input, strategy = 'probabilistic', lemmas = lemmas, lemma_dict = lemma_dict)
+                    elif strategy == 'probabilistic-winner-takes-all':
+                        if func:
+                            behav_terms = [[term, 100] for term in behav_terms]
+                        anat_terms = [coord[0] for coord in coords if coord]
+                        anat_mat, behav_mat, func_mat = get_mats(anat_list, behav_list, anat_mat, behav_mat, func_mat, behav_terms + anat_terms, anat = anat, func = func, input = input, strategy = 'probabilistic-winner-takes-all', lemmas = lemmas, lemma_dict = lemma_dict)
+                    print("Mapped {}, study {} out of {}".format(key, count, len(files)))
+                    count += 1
+
+
         # If input is abstracts, map terms from preprocessed abstracts in data dictionary
-        if input == 'abstracts':
+        elif input == 'abstracts':
             exc_count = 0
             for key, dict in data.iteritems():
                 if dict['MNI_COORDINATES']:
@@ -405,9 +481,9 @@ def map(path, input, anat = None, behav = None, func = None, level = None, behav
                     brainmap = ""
             print("Excluded {} of {} studies due to missing coordinates".format(exc_count, len(data.keys())))
 
-        # If input is texts, map terms from files of preprocessed texts
-        elif input == 'texts':
-            files = filter(lambda f: not f.startswith("."), os.listdir("{}/texts/texts/preproc".format(path)))
+        # If input is texts or results, map terms from preprocessed files
+        elif input in ['texts', 'results']:
+            files = filter(lambda f: not f.startswith("."), os.listdir("{}/texts/{}/preproc".format(path, input)))
             for file in files:
                 key = file.replace(".txt", "")
                 if key in data.keys():
@@ -428,17 +504,16 @@ def map(path, input, anat = None, behav = None, func = None, level = None, behav
         elif input == 'coordinates':
             if smooth:
                 query_path = "{}/queries/{}/gaussian_{}mm".format(path, level, sigma)
-                files = filter(lambda f: not f.startswith("."), os.listdir(query_path))
             elif not smooth:
                 query_path = "{}/queries/{}/raw".format(path, level)
-                files = filter(lambda f: not f.startswith("."), os.listdir(query_path))
+            files = filter(lambda f: not f.startswith("."), os.listdir(query_path))
             for file in files:
                 key = file.replace(".txt", "")
                 if key in data.keys():
+                    coords = load_coords(query_path, file)
                     behav_terms = []
                     if func:
                         behav_terms = get_behav(behav_input, behav_list, path, key, data, level, lemmas = lemmas, lemma_dict = lemma_dict)
-                    coords = ast.literal_eval(open("{}/{}".format(query_path, file), "r").read())
                     if strategy == 'winner-takes-all':
                         anat_terms = [coord[0][0] for coord in coords if coord]
                         anat_mat, behav_mat, func_mat = get_mats(anat_list, behav_list, anat_mat, behav_mat, func_mat, behav_terms + anat_terms, anat = anat, func = func, input = input, strategy = 'winner-takes-all', lemmas = lemmas, lemma_dict = lemma_dict)
@@ -461,32 +536,32 @@ def map(path, input, anat = None, behav = None, func = None, level = None, behav
 
         # Build graphs and write to files
         if anat:
-            export(path, anat_mat, threshold = threshold, type = 'anat', input = input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, level = level)
+            export(path, anat_mat, threshold = threshold, type = 'anat', input = input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled)
         if behav or input == 'brainmap':
-            export(path, behav_mat, threshold = threshold, type = 'behav', input = input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, level = level)
+            export(path, behav_mat, threshold = threshold, type = 'behav', input = input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled)
         if func:
-            export(path, func_mat, behav_input = behav_input, threshold = threshold, type = 'func', input = input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, level = level)
+            export(path, func_mat, behav_input = behav_input, threshold = threshold, type = 'func', input = input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, level = level, scrambled = scrambled)
             
         # Print message with path to output
         print_message(path, input, smooth, sigma, threshold)
 
     # If raw networks available and threshold specified, generate thresholded networks
-    elif threshold and networks_exist(path, input, anat = anat, behav = behav, func = func, behav_input = behav_input, strategy = strategy, smooth = smooth, sigma = sigma, window = window, lemmas = lemmas, level = level, threshold = threshold):
+    elif threshold and networks_exist(path, input, anat = anat, behav = behav, func = func, behav_input = behav_input, strategy = strategy, smooth = smooth, sigma = sigma, window = window, lemmas = lemmas, neighbors = neighbors, level = level, threshold = threshold):
         
         # Print message that networks found
         print("Raw networks found in {}/networks".format(path))
     
         # Raw network file names
-        anat_raw = get_filename(path, input, 'anat', smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, level = level)
-        behav_raw = get_filename(path, input, 'behav', smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, level = level)
-        func_raw = get_filename(path, input, 'func', behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, level = level)
+        anat_raw = get_filename(path, input, anat = True, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, level = level)
+        behav_raw = get_filename(path, input, behav = True, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, level = level)
+        func_raw = get_filename(path, input, func = True, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, window = window, lemmas = lemmas, neighbors = neighbors, level = level)
         
         # Thresholded network file names
-        anat_thres = get_filename(path, input, 'anat', smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, level = level)
-        behav_thres = get_filename(path, input, 'behav', smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, level = level)
-        func_thres = get_filename(path, input, 'func', behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, level = level)
+        anat_thres = get_filename(path, input, anat = True, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level)
+        behav_thres = get_filename(path, input, behav = True, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level)
+        func_thres = get_filename(path, input, func = True, behav_input = behav_input, smooth = smooth, sigma = sigma, strategy = strategy, threshold = threshold, window = window, lemmas = lemmas, neighbors = neighbors, level = level)
         
-        if input == 'abstracts' or input == 'texts':
+        if input in ['abstracts', 'texts', 'results']:
             graphs = [(anat_raw, anat_thres), (behav_raw, behav_thres), (func_raw, func_thres)]
         elif input == 'coordinates':
             graphs = [(anat_raw, anat_thres), (func_raw, func_thres)]

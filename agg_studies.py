@@ -81,7 +81,6 @@ def agg(path, agg_disorders = None, agg_data = None, fetch_abstracts = None, ref
 
     # Initialize data dictionary
     data = dict()
-    
 
     # Aggregate BrainMap data downloaded by disorder
     if agg_disorders:
